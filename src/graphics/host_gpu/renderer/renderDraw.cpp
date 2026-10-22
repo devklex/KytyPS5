@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/meshDrawChunks.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -1132,6 +1133,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
 	const bool mesh_active = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
 	uint32_t   mesh_groups = 0;
+	uint32_t   mesh_instances_per_dispatch = 0;
 	if (mesh_active) {
 		const auto& mesh = state.vertex_info[0].mesh;
 		EXIT_NOT_IMPLEMENTED(mesh.fast_launch && (draw.IsIndexed() || primitive_restart_enable));
@@ -1151,10 +1153,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		mesh_groups        = (primitives - 1u) / mesh.primitives_per_group + 1u;
 		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
-		if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
-		    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
-		    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
-		        limits.maxMeshWorkGroupTotalCount) {
+		// Instances beyond one dispatch's limit (Astro Bot's Sky Garden draws 71682) are split
+		// into several dispatches below.
+		mesh_instances_per_dispatch = MeshDrawInstancesPerDispatch(
+		    mesh_groups, limits.maxMeshWorkGroupCount[0], limits.maxMeshWorkGroupCount[1],
+		    limits.maxMeshWorkGroupTotalCount);
+		if (mesh_instances_per_dispatch == 0) {
 			EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
 			     draw.instance_count);
 		}
@@ -1274,7 +1278,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
 	if (mesh_active) {
-		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+		for (uint32_t first = 0; first < draw.instance_count; first += mesh_instances_per_dispatch) {
+			if (first != 0) {
+				// Push-data dword 2 is the first instance; the shader adds WorkgroupId.y.
+				const uint32_t first_instance = emit.first_instance + first;
+				vk_buffer.pushConstants(pipeline.pipeline_layout, draw_stages, 2u * sizeof(uint32_t),
+				                        sizeof(uint32_t), &first_instance);
+			}
+			vk_buffer.drawMeshTasksEXT(
+			    mesh_groups, std::min(mesh_instances_per_dispatch, draw.instance_count - first), 1);
+		}
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}

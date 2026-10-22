@@ -1,5 +1,7 @@
 #include "graphics/shader/shaderVertexMetadata.h"
+#include "graphics/host_gpu/renderer/meshDrawChunks.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -108,10 +110,40 @@ void TestValidAndInvalidMetadata() {
 	CheckRejected(missing_semantics.mapped, "missing vertex semantic array was accepted");
 }
 
+// NVIDIA's limits: maxMeshWorkGroupCount {4194304, 65535, 65535}, maxMeshWorkGroupTotalCount 4194304.
+// Astro Bot's Sky Garden draws one mesh group of 71682 instances, which one dispatch cannot carry.
+void TestMeshDrawInstanceChunks() {
+	constexpr uint32_t max_x = 4194304, max_y = 65535, max_total = 4194304;
+	const auto covered = [&](uint32_t groups, uint32_t instances, uint32_t expected_dispatches) {
+		const auto per_dispatch = MeshDrawInstancesPerDispatch(groups, max_x, max_y, max_total);
+		Check(per_dispatch != 0, "a representable mesh draw got no instances per dispatch");
+		uint32_t dispatches = 0, next = 0;
+		for (uint32_t first = 0; first < instances; first += per_dispatch, dispatches++) {
+			const auto count = std::min(per_dispatch, instances - first);
+			Check(first == next && count <= max_y && uint64_t {groups} * count <= max_total,
+			      "a mesh draw dispatch broke a workgroup limit or skipped instances");
+			next = first + count;
+		}
+		Check(next == instances && dispatches == expected_dispatches,
+		      "mesh draw dispatches do not cover every instance exactly once");
+	};
+	covered(1, 71682, 2);       // Sky Garden: 65535 + 6147 instances.
+	covered(1, 65535, 1);       // Exactly at the per-dimension limit.
+	covered(100, 100000, 3);    // The total-count limit binds first: 41943 per dispatch.
+	covered(4194304, 1, 1);     // The whole total count in X leaves one instance per dispatch.
+	Check(MeshDrawInstancesPerDispatch(100, max_x, max_y, max_total) == 41943,
+	      "the total workgroup count limit was ignored");
+	Check(MeshDrawInstancesPerDispatch(4194305, max_x, max_y, max_total) == 0,
+	      "a draw with more groups than maxMeshWorkGroupCount[0] was accepted");
+	Check(MeshDrawInstancesPerDispatch(0, max_x, max_y, max_total) == 0,
+	      "a draw without groups was given instances");
+}
+
 } // namespace
 
 int main() {
 	TestValidAndInvalidMetadata();
+	TestMeshDrawInstanceChunks();
 	std::puts("ShaderVertexMetadataTests: all cases passed");
 	return 0;
 }
