@@ -49,6 +49,14 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 	if (variable == 0) {
 		return ConstantU32(state, 0);
 	}
+	if (kind == IR::StageInputKind::HelperInvocation) {
+		const auto value = state.builder.AllocateId();
+		const auto bits  = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, TypeBool(state), value, variable);
+		state.builder.AddFunction(spv::OpSelect, TypeU32(state), bits, value, ConstantU32(state, 1),
+		                          ConstantU32(state, 0));
+		return bits;
+	}
 	if (kind == IR::StageInputKind::FrontFacing) {
 		const auto value = state.builder.AllocateId();
 		const auto bits  = state.builder.AllocateId();
@@ -477,6 +485,12 @@ uint32_t EmitWqmU64(EmitterState& state, uint32_t value) {
 	state.builder.AddFunction(spv::OpIMul, TypeU64(state), result, quad_bits,
 	                          ConstantU64(state, 15));
 	return result;
+}
+
+// Constant propagation folds or lowers every WqmLiveU1; without that pass the value is the
+// expansion from the scalar mask.
+uint32_t EmitWqmLiveU1(EmitterState& /*state*/, uint32_t /*known*/, uint32_t expanded) {
+	return expanded;
 }
 
 void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {

@@ -5163,6 +5163,10 @@ void TestNewShaderRecompilerCapturedVopcSdwaCmpxClass() {
   uint32_t class_compares = 0u;
   uint32_t dynamic_exec_writes = 0u;
   for (const auto *block : ir.blocks) {
+    // The synthetic entry block starts a pixel shader's EXEC at its live (non-helper) lanes.
+    if (block == ir.blocks.front()) {
+      continue;
+    }
     for (const auto &inst : *block) {
       class_compares +=
           inst.GetOpcode() == IR::ValueOpcode::FPCmpClass32 ? 1u : 0u;

@@ -1149,6 +1149,16 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 				    entry_ir.ULessThan(builtin(IR::StageInputKind::GlobalInvocationId, axis), extent));
 			}
 		}
+		// The hardware starts a pixel wave with EXEC = its live pixels; S_WQM adds the quads' helper
+		// lanes for derivatives, and compilers save the starting EXEC as the live mask for exact-
+		// mode stores and atomics. Vulkan helper invocations are active subgroup members whose
+		// stores and atomics have no effect, so they must not be live lanes: DS_APPEND could elect
+		// one and hand the whole wave an undefined base, and lanes ranked by V_MBCNT would share
+		// list nodes (Astro Bot's per-pixel lists looped and hung the GPU).
+		if (options.stage == ShaderType::Pixel) {
+			initial_exec = entry_ir.IEqual(builtin(IR::StageInputKind::HelperInvocation),
+			                               IR::U32(IR::Value(0u)));
+		}
 		entry_ir.SetExec(initial_exec);
 		const auto initial_mask = entry_ir.Emit(IR::ValueOpcode::Ballot, {initial_exec});
 		const auto initial_lo = entry_ir.CompositeExtract(initial_mask, 0);

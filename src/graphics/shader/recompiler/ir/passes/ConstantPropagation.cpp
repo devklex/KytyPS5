@@ -281,6 +281,19 @@ void FoldZeroComparison(Block& block, Block::iterator instruction, FoldWorklist&
 	}
 }
 
+// A pixel shader's starting EXEC (Translate.cpp): HelperInvocation == 0.
+bool IsPixelEntryLive(Value value) {
+	const auto* live = value.TryInstruction();
+	if (live == nullptr || live->GetOpcode() != ValueOpcode::IEqual32 ||
+	    !IsImmediate(Arg(*live, 1), Type::U32) || Arg(*live, 1).U32() != 0u) {
+		return false;
+	}
+	const auto* input = Arg(*live, 0).TryInstruction();
+	return input != nullptr && input->GetOpcode() == ValueOpcode::GetBuiltin &&
+	       IsImmediate(Arg(*input, 0), Type::U32) &&
+	       Arg(*input, 0).U32() == static_cast<uint32_t>(StageInputKind::HelperInvocation);
+}
+
 void FoldInstruction(Block& block, Block::iterator instruction,
 	                      FoldWorklist& worklist) {
 	auto& inst = *instruction;
@@ -515,6 +528,16 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			}
 			return;
 		}
+		case ValueOpcode::WqmLiveU1:
+			// S_WQM's per-lane result: argument 0 holds the lanes its source mask is known to
+			// hold, argument 1 the result expanded from the scalar mask. WQM of a pixel shader's
+			// starting live mask is every invocation the host launched, because the host runs a
+			// helper invocation only to complete a quad that has a covered pixel.
+			if ((IsImmediate(Arg(inst, 0), Type::U1) && Arg(inst, 0).U1()) ||
+			    IsPixelEntryLive(Arg(inst, 0))) {
+				Replace(inst, Value(true));
+			}
+			return;
 		case ValueOpcode::UDiv32: {
 			const auto rhs = Arg(inst, 1);
 			if (IsImmediate(rhs, Type::U32) && rhs.U32() == 1u) {
@@ -1013,6 +1036,19 @@ void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
 		}
 		drain();
 	} while (normalized);
+	// An S_WQM result that did not fold is its expansion from the scalar mask; later folds and
+	// passes see that expression itself.
+	bool wqm_lowered = false;
+	for (auto* block: blocks) {
+		for (auto& inst: *block) {
+			if (inst.GetOpcode() == ValueOpcode::WqmLiveU1) {
+				worklist.QueueUsers(inst.Uses());
+				Replace(inst, Arg(inst, 1));
+				wqm_lowered = true;
+			}
+		}
+	}
+	if (wqm_lowered) drain();
 	// Repeated register reads share a bitcast only within the same SSA block.
 	std::unordered_map<const Inst*, Inst*> bitcasts;
 	for (auto* block: blocks) {

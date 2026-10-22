@@ -247,7 +247,8 @@ enum class StageInputKind {
 	LocalInvocationId,
 	LocalInvocationIndex,
 	GlobalInvocationId,
-	Parameter,
+	HelperInvocation, // Pixel shaders: 1 for helper invocations, which have no live pixel.
+	Parameter,        // Last: InputUsage sizes its builtin list by this value.
 };
 
 enum class StageOutputKind {

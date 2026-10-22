@@ -227,6 +227,7 @@ inline constexpr auto EmitUndefU32 = EmitUndefU1;
 uint32_t              EmitDppMoveU32(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitDppUpdateU32(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitWqmU64(EmitterState& state, uint32_t value);
+uint32_t              EmitWqmLiveU1(EmitterState& state, uint32_t known, uint32_t expanded);
 uint32_t              EmitLaneId(EmitterState& state);
 uint32_t              EmitBallot(ValueEmitContext& ctx, IR::Value predicate);
 uint32_t              EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst);

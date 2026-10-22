@@ -365,7 +365,8 @@ void Translator::S_WQM(const Decoder::Instruction& inst, bool wide) {
 			}
 			// A cross-half copy refers to different lanes, so only scalar bits apply.
 			if (is_high_half(inst.src0) == destination_is_high) {
-				live = ir.LogicalOr(retained_live, live);
+				live = IR::U1(ir.Emit(IR::ValueOpcode::WqmLiveU1,
+				                      {retained_live, ir.LogicalOr(retained_live, live)}));
 			}
 			live = IR::U1(ir.Emit(IR::ValueOpcode::SelectU1, {affected_lanes, live, old_live}));
 			if (destination_is_exec) {
@@ -380,8 +381,11 @@ void Translator::S_WQM(const Decoder::Instruction& inst, bool wide) {
 
 	// WQM adds live lanes but never removes a source lane. Keep that fact separate
 	// from the scalar mask: reconstructing an entry-true predicate from a ballot
-	// otherwise introduces a spurious dependency into every vector write.
-	const auto live = ir.LogicalOr(retained_live, ThreadBit(ExtractU64(result)));
+	// otherwise introduces a spurious dependency into every vector write. WqmLiveU1 lets
+	// constant propagation turn WQM of a pixel shader's starting live mask into true.
+	const auto live = IR::U1(ir.Emit(
+	    IR::ValueOpcode::WqmLiveU1,
+	    {retained_live, ir.LogicalOr(retained_live, ThreadBit(ExtractU64(result)))}));
 	WriteOperand(DestinationOperand(inst), result);
 	if (inst.dst.kind == Decoder::OperandKind::ExecLo) {
 		ir.SetExec(live);

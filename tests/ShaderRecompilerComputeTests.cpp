@@ -42933,6 +42933,73 @@ GraphicsCase GraphicsObjectPrimitiveId(bool discard) {
   return test;
 }
 
+// The hardware starts a pixel wave with EXEC = its live pixels; S_WQM adds the quads' helper lanes,
+// and compilers save the starting EXEC as the live mask for exact-mode stores and atomics. The
+// triangle covers pixel 0 of a 4x1 target, so pixel 1 of the same quad runs as a Vulkan helper
+// invocation, which must never be a live lane. Astro Bot's list builders allocate nodes with
+// DS_APPEND and V_MBCNT ranks, both in a plain shader (PS 4a55033774c8f01e) and in exact mode under
+// a saved live mask after S_WQM (PS d607561f0debb616); a counted helper made lanes share nodes.
+// Modes: Live (no WQM: 1 active lane), Wqm (after S_WQM the helper is active: >= 2 lanes),
+// WqmExact (S_WQM, then EXEC &= the saved starting EXEC: 1 active lane again).
+// Exports: (active lanes, or active lanes >= 2 for Wqm; active lanes below pixel 0; 1; 1).
+enum class HelperLaneMode { Live, Wqm, WqmExact };
+
+GraphicsCase GraphicsPixelExecExcludesHelperLanes(HelperLaneMode mode) {
+  using O = ShaderOpcode;
+  GraphicsCase test;
+  test.name = mode == HelperLaneMode::Live  ? "GraphicsPixelExecExcludesHelperLanes"
+              : mode == HelperLaneMode::Wqm ? "GraphicsPixelWqmAddsHelperLanes"
+                                            : "GraphicsPixelWqmExactUsesLiveMask";
+  auto &code = test.fragment_code;
+  if (mode != HelperLaneMode::Live) {
+    code.push_back(EncodeSop1(0x04, 10, 126)); // s_mov_b64 s[10:11], exec (the live mask)
+    code.push_back(EncodeSop1(0x0a, 126, 126)); // s_wqm_b64 exec, exec
+  }
+  if (mode == HelperLaneMode::WqmExact) {
+    code.push_back(EncodeSop1(0x24, 12, 10)); // s_and_saveexec_b64 s[12:13], s[10:11]
+  }
+  code.push_back(EncodeSop1(0x10, 0, 126)); // s_bcnt1_i32_b64 s0, exec
+  AppendVMovU32(&code, 3, 0);
+  code.push_back(EncodeVop2(0x24, 1, 127, 3)); // v_mbcnt_hi_u32_b32 v1, exec_hi, v3
+  code.push_back(EncodeVop2(0x23, 1, 126, 1)); // v_mbcnt_lo_u32_b32 v1, exec_lo, v1
+  if (mode == HelperLaneMode::WqmExact) {
+    code.push_back(EncodeSop1(0x04, 126, 12)); // s_mov_b64 exec, s[12:13] (back to WQM)
+  }
+  code.push_back(EncodeVop1(0x01, 2, 0)); // v_mov_b32 v2, s0
+  code.push_back(EncodeVop1(0x06, 4, Vgpr(2)));
+  code.push_back(EncodeVop1(0x06, 5, Vgpr(1)));
+  AppendVMovLiteral(&code, 6, 0x3f800000u);
+  if (mode == HelperLaneMode::Wqm) {
+    // The helper may be joined by the quad's two lanes below the 1-pixel target; count >= 2.
+    code.push_back(EncodeVopc(0xc3, InlineU32(2), 2)); // v_cmp_le_u32 vcc, 2, v2
+    code.push_back(EncodeVop2(0x01, 4, InlineU32(0), 6));
+  }
+  code.push_back(EncodeExp0(0x00, 0xf, true, false, true));
+  code.push_back(EncodeExp1(4, 5, 6, 6));
+  AppendEnd(&code);
+  test.opcodes = {O::S_BCNT1_I32_B64, O::V_MBCNT_HI_U32_B32, O::V_MBCNT_LO_U32_B32,
+                  O::V_MOV_B32, O::V_CVT_F32_U32, O::EXP, O::S_ENDPGM};
+  if (mode != HelperLaneMode::Live) {
+    test.opcodes.insert(test.opcodes.end(), {O::S_MOV_B64, O::S_WQM_B64});
+  }
+  if (mode == HelperLaneMode::Wqm) {
+    test.opcodes.insert(test.opcodes.end(), {O::V_CMP_LE_U32, O::V_CNDMASK_B32});
+  }
+  if (mode == HelperLaneMode::WqmExact) {
+    test.opcodes.push_back(O::S_AND_SAVEEXEC_B64);
+  }
+  test.width = 4;
+  for (const auto &position : std::array<std::array<float, 2>, 3>{{
+           {-1.0f, -1.0f}, {-0.5f, -1.0f}, {-1.0f, 3.0f}}}) {
+    test.vertices.insert(test.vertices.end(),
+                         {std::bit_cast<u32>(position[0]),
+                          std::bit_cast<u32>(position[1]), 0, 0, 0, 0x3f800000u});
+  }
+  test.expected_pixel = {0x3f800000u, 0u, 0x3f800000u, 0x3f800000u};
+  test.expected_pixel.resize(4u * test.width, 0u);
+  return test;
+}
+
 TestCase MultipleWorkitemsGlobalId() {
   using O = ShaderOpcode;
 
@@ -43607,6 +43674,9 @@ std::vector<GraphicsCase> MakeGraphicsCases() {
       GraphicsBranchPathFinalVmExportDiscardsInactiveExec(),
       GraphicsObjectPrimitiveId(false),
       GraphicsObjectPrimitiveId(true),
+      GraphicsPixelExecExcludesHelperLanes(HelperLaneMode::Live),
+      GraphicsPixelExecExcludesHelperLanes(HelperLaneMode::Wqm),
+      GraphicsPixelExecExcludesHelperLanes(HelperLaneMode::WqmExact),
   };
 }
 
@@ -49651,6 +49721,13 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--position-w-only") == 0) {
     VulkanHarness vulkan;
     RunGraphicsCase(&vulkan, GraphicsPositionWExport());
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--pixel-helper-only") == 0) {
+    VulkanHarness vulkan;
+    for (const auto mode : {HelperLaneMode::Live, HelperLaneMode::Wqm, HelperLaneMode::WqmExact}) {
+      RunGraphicsCase(&vulkan, GraphicsPixelExecExcludesHelperLanes(mode));
+    }
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--object-primitive-id-only") == 0) {
